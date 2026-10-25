@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+﻿#import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <substrate.h>
@@ -252,11 +252,14 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
             %init(VCamHooks);
         }
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-                @autoreleasepool {
-                    setupFloatButton();
-                }
-            });
+        if ([bundleID isEqualToString:@"com.apple.springboard"]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                    @autoreleasepool {
+                        setupFloatButton();
+                    }
+                });
+        }
     }
 }
+
