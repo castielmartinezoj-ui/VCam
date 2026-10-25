@@ -68,3 +68,4 @@ ssh root@设备IP "killall -9 SpringBoard"
 ## License
 
 MIT
+build build
