@@ -24,7 +24,10 @@ static void arm64_patch(void *target, void *replacement, uint8_t *saved) {
     p[0] = 0x58000050;                          // ldr x16, #8
     p[1] = 0xD61F0200;                          // br x16
     *(uintptr_t *)(p + 2) = addr;
-    __builtin___clear_cache((char *)target, (char *)target + 16);
+    typedef void (*ic_fn)(void *, size_t);
+    static ic_fn ic = NULL;
+    if (!ic) ic = (ic_fn)dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
+    if (ic) ic((char *)target, (char *)target + 16);
 }
 
 #define MAX_HOOKS 24
