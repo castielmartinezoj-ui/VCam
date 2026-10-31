@@ -1,5 +1,6 @@
-// jbhide.m — ocultamiento de jailbreak SIN frida, SIN substrate
-// Inline hooker arm64 propio + interposicion de las funciones que la app usa.
+// jbhide.m — ocultamiento de jailbreak con MSHookFunction (substrate/ElleKit)
+// El hooker naive no puede escribir paginas r-x del shared cache en iOS 16;
+// MSHookFunction usa el backend privilegiado de ElleKit y si puede.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -7,57 +8,13 @@
 #import <sys/types.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>
-#import <sys/mman.h>
 #import <unistd.h>
 #import <fcntl.h>
 #import <dirent.h>
 #import <errno.h>
 #import <sys/attr.h>
 #import <stdarg.h>
-#import <dlfcn.h>
-
-// ============================ inline hooker (arm64) ============================
-static void arm64_patch(void *target, void *replacement, uint8_t *saved) {
-    memcpy(saved, target, 16);
-    uint32_t *p = (uint32_t *)target;
-    uintptr_t addr = (uintptr_t)replacement;
-    p[0] = 0x58000050;                          // ldr x16, #8
-    p[1] = 0xD61F0200;                          // br x16
-    *(uintptr_t *)(p + 2) = addr;
-    typedef void (*ic_fn)(void *, size_t);
-    static ic_fn ic = NULL;
-    if (!ic) ic = (ic_fn)dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
-    if (ic) ic((char *)target, 16);
-}
-
-#define MAX_HOOKS 24
-typedef struct {
-    void *orig;
-    uint8_t saved[16];
-    void *tramp;
-} HookEntry;
-
-static HookEntry g_hooks[MAX_HOOKS];
-static int g_hookCount = 0;
-
-static void *make_hook(void *target, void *replacement) {
-    for (int i = 0; i < g_hookCount; i++) {
-        if (g_hooks[i].orig == target) return g_hooks[i].tramp;
-    }
-    if (g_hookCount >= MAX_HOOKS) return target;
-    HookEntry *e = &g_hooks[g_hookCount++];
-    e->orig = target;
-    arm64_patch(target, replacement, e->saved);
-    void *mem = mmap(NULL, 64, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-    memcpy(mem, e->saved, 16);
-    uint32_t *tp = (uint32_t *)((uint8_t *)mem + 16);
-    tp[0] = 0x58000050;
-    tp[1] = 0xD61F0200;
-    *(uintptr_t *)(tp + 2) = (uintptr_t)((uint8_t *)target + 16);
-    mprotect(mem, 64, PROT_READ | PROT_EXEC);
-    e->tramp = mem;
-    return mem;
-}
+#import <substrate.h>
 
 // ============================ deteccion de rutas ============================
 static bool jb_path(const char *p) {
@@ -179,21 +136,21 @@ static BOOL jb_canOpenURL(id self, SEL _cmd, NSURL *url) {
 // ============================ constructor ============================
 __attribute__((constructor))
 static void jbhide_init(void) {
-    // SOLO en la app objetivo — jamas en SpringBoard/Camara (tumbaria el boot)
+    // SOLO en la app objetivo — jamas en SpringBoard/Camara
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     if (!bid || ![bid isEqualToString:@"com.interbank.bancamovil"]) {
         return;
     }
 
-    real_open = make_hook((void *)open, (void *)hook_open);
-    real_fopen = make_hook((void *)fopen, (void *)hook_fopen);
-    real_access = make_hook((void *)access, (void *)hook_access);
-    real_stat = make_hook((void *)stat, (void *)hook_stat);
-    real_lstat = make_hook((void *)lstat, (void *)hook_lstat);
-    real_fstatat = make_hook((void *)fstatat, (void *)hook_fstatat);
-    real_getattrlist = make_hook((void *)getattrlist, (void *)hook_getattrlist);
-    real_opendir = make_hook((void *)opendir, (void *)hook_opendir);
-    real_sysctl = make_hook((void *)sysctl, (void *)hook_sysctl);
+    MSHookFunction((void *)open, (void *)hook_open, (void **)&real_open);
+    MSHookFunction((void *)fopen, (void *)hook_fopen, (void **)&real_fopen);
+    MSHookFunction((void *)access, (void *)hook_access, (void **)&real_access);
+    MSHookFunction((void *)stat, (void *)hook_stat, (void **)&real_stat);
+    MSHookFunction((void *)lstat, (void *)hook_lstat, (void **)&real_lstat);
+    MSHookFunction((void *)fstatat, (void *)hook_fstatat, (void **)&real_fstatat);
+    MSHookFunction((void *)getattrlist, (void *)hook_getattrlist, (void **)&real_getattrlist);
+    MSHookFunction((void *)opendir, (void *)hook_opendir, (void **)&real_opendir);
+    MSHookFunction((void *)sysctl, (void *)hook_sysctl, (void **)&real_sysctl);
 
     Class nsFileMgr = objc_getClass("NSFileManager");
     if (nsFileMgr) {
