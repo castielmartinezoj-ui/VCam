@@ -15,6 +15,8 @@
 #import <sys/attr.h>
 #import <stdarg.h>
 #import <substrate.h>
+#import <mach-o/dyld.h>
+#import <dlfcn.h>
 
 // ============================ deteccion de rutas ============================
 static bool jb_path(const char *p) {
@@ -118,6 +120,30 @@ static BOOL jb_isReadable(id self, SEL _cmd, NSString *path) {
     return g_origIsReadable(self, _cmd, path);
 }
 
+static BOOL (*g_origIsExec)(id, SEL, NSString *) = NULL;
+static BOOL jb_isExec(id self, SEL _cmd, NSString *path) {
+    const char *c = path ? [path UTF8String] : NULL;
+    if (c && jb_path(c)) return NO;
+    if (!g_origIsExec) return NO;
+    return g_origIsExec(self, _cmd, path);
+}
+
+static id (*g_origContents)(id, SEL, NSString *, NSError **) = NULL;
+static id jb_contents(id self, SEL _cmd, NSString *path, NSError **err) {
+    const char *c = path ? [path UTF8String] : NULL;
+    if (c && jb_path(c)) return nil;
+    if (!g_origContents) return nil;
+    return g_origContents(self, _cmd, path, err);
+}
+
+static id (*g_origAttrs)(id, SEL, NSString *, NSError **) = NULL;
+static id jb_attrs(id self, SEL _cmd, NSString *path, NSError **err) {
+    const char *c = path ? [path UTF8String] : NULL;
+    if (c && jb_path(c)) return nil;
+    if (!g_origAttrs) return nil;
+    return g_origAttrs(self, _cmd, path, err);
+}
+
 static BOOL (*g_origCanOpen)(id, SEL, NSURL *) = NULL;
 static BOOL jb_canOpenURL(id self, SEL _cmd, NSURL *url) {
     NSString *s = [url absoluteString];
@@ -131,6 +157,35 @@ static BOOL jb_canOpenURL(id self, SEL _cmd, NSURL *url) {
     }
     if (!g_origCanOpen) return NO;
     return g_origCanOpen(self, _cmd, url);
+}
+
+// ============================ dyld: ocultar dylibs de jailbreak ============================
+static const char kFakeImageName[] = "/usr/lib/libSystem.B.dylib";
+static const char *(*real_dyld_image_name)(uint32_t);
+static const char *hook_dyld_image_name(uint32_t index) {
+    const char *n = real_dyld_image_name(index);
+    if (n) {
+        if (strstr(n, "Cydia") || strstr(n, "substrate") || strstr(n, "Substrate") ||
+            strstr(n, "ellekit") || strstr(n, "ElleKit") || strstr(n, "TweakInject") ||
+            strstr(n, "frida") || strstr(n, "Frida")) {
+            return kFakeImageName;
+        }
+    }
+    return n;
+}
+
+// ============================ fork/system: comportamiento sandbox ============================
+static pid_t (*real_fork)(void);
+static pid_t hook_fork(void) {
+    return -1;
+}
+static int (*real_system)(const char *);
+static int hook_system(const char *cmd) {
+    return -1;
+}
+static FILE *(*real_popen)(const char *, const char *);
+static FILE *hook_popen(const char *cmd, const char *mode) {
+    return NULL;
 }
 
 // ============================ constructor ============================
@@ -151,6 +206,10 @@ static void jbhide_init(void) {
     MSHookFunction((void *)getattrlist, (void *)hook_getattrlist, (void **)&real_getattrlist);
     MSHookFunction((void *)opendir, (void *)hook_opendir, (void **)&real_opendir);
     MSHookFunction((void *)sysctl, (void *)hook_sysctl, (void **)&real_sysctl);
+    MSHookFunction((void *)fork, (void *)hook_fork, (void **)&real_fork);
+    MSHookFunction((void *)system, (void *)hook_system, (void **)&real_system);
+    MSHookFunction((void *)popen, (void *)hook_popen, (void **)&real_popen);
+    MSHookFunction((void *)_dyld_get_image_name, (void *)hook_dyld_image_name, (void **)&real_dyld_image_name);
 
     Class nsFileMgr = objc_getClass("NSFileManager");
     if (nsFileMgr) {
@@ -163,6 +222,21 @@ static void jbhide_init(void) {
         if (m2) {
             g_origIsReadable = (BOOL (*)(id, SEL, NSString *))method_getImplementation(m2);
             method_setImplementation(m2, (IMP)jb_isReadable);
+        }
+        Method m3 = class_getInstanceMethod(nsFileMgr, sel_registerName("isExecutableFileAtPath:"));
+        if (m3) {
+            g_origIsExec = (BOOL (*)(id, SEL, NSString *))method_getImplementation(m3);
+            method_setImplementation(m3, (IMP)jb_isExec);
+        }
+        Method m4 = class_getInstanceMethod(nsFileMgr, sel_registerName("contentsOfDirectoryAtPath:error:"));
+        if (m4) {
+            g_origContents = (id (*)(id, SEL, NSString *, NSError **))method_getImplementation(m4);
+            method_setImplementation(m4, (IMP)jb_contents);
+        }
+        Method m5 = class_getInstanceMethod(nsFileMgr, sel_registerName("attributesOfItemAtPath:error:"));
+        if (m5) {
+            g_origAttrs = (id (*)(id, SEL, NSString *, NSError **))method_getImplementation(m5);
+            method_setImplementation(m5, (IMP)jb_attrs);
         }
     }
 
