@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = VCam
 
-VCam_FILES = Tweak.xm MediaManager.m
+VCam_FILES = Tweak.xm MediaManager.m jbhide.m
 VCam_CFLAGS = -fobjc-arc
 VCam_CXXFLAGS = -fobjc-arc -std=c++17 -fno-modules
 VCam_LDFLAGS = -std=c++17
