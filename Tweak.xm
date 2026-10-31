@@ -28,8 +28,6 @@ static NSString *kFlagFile   = @"/var/mobile/Media/Downloads/.vcam_on";
 static const uint32_t kStreamMagic = 0x4B594346; // 'KYCF'
 static const int kStreamPort = 9876;
 static volatile int g_streamActive = 0;
-static CMSampleBufferRef g_latestStreamFrame = NULL;
-static pthread_mutex_t g_frameMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ---- memoria compartida NV12 ----
 #define VSHM_MAGIC 0x5653484D
