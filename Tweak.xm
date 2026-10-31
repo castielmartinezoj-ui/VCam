@@ -342,21 +342,8 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         message:g_vcamEnabled ? @"VCam activada" : @"VCam desactivada"
         preferredStyle:UIAlertControllerStyleActionSheet];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Elegir video"
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-
-        if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeSavedPhotosAlbum]) {
-            return;
-        }
-        UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-        picker.sourceType = UIImagePickerControllerSourceTypeSavedPhotosAlbum;
-        picker.mediaTypes = @[@"public.movie"];
-        picker.delegate = g_pickerDelegate;
-        [topVC presentViewController:picker animated:YES completion:nil];
-    }]];
-
     [alert addAction:[UIAlertAction actionWithTitle:g_vcamEnabled ? @"Desactivar VCam" : @"Activar VCam"
-        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         g_vcamEnabled = !g_vcamEnabled;
         setSharedFlag(g_vcamEnabled);
         if (g_floatButton) {
