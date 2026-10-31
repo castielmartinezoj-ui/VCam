@@ -27,7 +27,7 @@ static void arm64_patch(void *target, void *replacement, uint8_t *saved) {
     typedef void (*ic_fn)(void *, size_t);
     static ic_fn ic = NULL;
     if (!ic) ic = (ic_fn)dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
-    if (ic) ic((char *)target, (char *)target + 16);
+    if (ic) ic((char *)target, 16);
 }
 
 #define MAX_HOOKS 24
