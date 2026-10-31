@@ -3,7 +3,6 @@
 #import <CoreMedia/CoreMedia.h>
 #import <substrate.h>
 #import "MediaManager.h"
-#import <Accelerate/Accelerate.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -63,10 +62,32 @@ static CMSampleBufferRef vcam_sample_from_rgba(const uint8_t *rgba, uint32_t w, 
     size_t yStride  = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
     size_t uvStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
 
-    vImage_Buffer src = { (void *)rgba, (vImagePixelCount)h, (vImagePixelCount)w, (size_t)w * 4 };
-    vImage_Buffer dstY = { y, (vImagePixelCount)h, (vImagePixelCount)w, yStride };
-    vImage_Buffer dstUV = { uv, (vImagePixelCount)(h / 2), (vImagePixelCount)(w / 2), uvStride };
-    vImageConvert_RGBA8888To420Yp8_CbCr8(&src, &dstY, &dstUV, kvImageNoFlags);
+    // Conversion RGBA -> NV12 (Y + CbCr intercalado), sin dependencias de vImage
+    for (uint32_t row = 0; row < h; ++row) {
+        const uint8_t *src = rgba + (size_t)row * w * 4;
+        uint8_t *yRow = y + (size_t)row * yStride;
+        for (uint32_t col = 0; col < w; ++col) {
+            int r = src[col * 4 + 0];
+            int g = src[col * 4 + 1];
+            int b = src[col * 4 + 2];
+            yRow[col] = (uint8_t)((66 * r + 129 * g + 25 * b + 128) >> 8);
+        }
+    }
+    for (uint32_t row = 0; row < h / 2; ++row) {
+        const uint8_t *src0 = rgba + (size_t)(row * 2) * w * 4;
+        const uint8_t *src1 = rgba + (size_t)(row * 2 + 1) * w * 4;
+        uint8_t *uvRow = uv + (size_t)row * uvStride;
+        for (uint32_t col = 0; col < w / 2; ++col) {
+            int r = (src0[col * 8 + 0] + src0[col * 8 + 4] +
+                     src1[col * 8 + 0] + src1[col * 8 + 4]) / 4;
+            int g = (src0[col * 8 + 1] + src0[col * 8 + 5] +
+                     src1[col * 8 + 1] + src1[col * 8 + 5]) / 4;
+            int b = (src0[col * 8 + 2] + src0[col * 8 + 6] +
+                     src1[col * 8 + 2] + src1[col * 8 + 6]) / 4;
+            uvRow[col * 2 + 0] = (uint8_t)((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+            uvRow[col * 2 + 1] = (uint8_t)((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+        }
+    }
 
     CVPixelBufferUnlockBaseAddress(pb, 0);
 
