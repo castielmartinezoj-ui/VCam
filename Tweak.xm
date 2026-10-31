@@ -339,10 +339,10 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"VCam"
-        message:g_vcamEnabled ? @"虚拟相机已启用" : @"虚拟相机已关闭"
+        message:g_vcamEnabled ? @"VCam activada" : @"VCam desactivada"
         preferredStyle:UIAlertControllerStyleActionSheet];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"选择视频"
+    [alert addAction:[UIAlertAction actionWithTitle:@"Elegir video"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
 
         if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeSavedPhotosAlbum]) {
@@ -355,7 +355,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         [topVC presentViewController:picker animated:YES completion:nil];
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:g_vcamEnabled ? @"关闭虚拟相机" : @"开启虚拟相机"
+    [alert addAction:[UIAlertAction actionWithTitle:g_vcamEnabled ? @"Desactivar VCam" : @"Activar VCam"
         style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         g_vcamEnabled = !g_vcamEnabled;
         setSharedFlag(g_vcamEnabled);
@@ -372,7 +372,7 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         }
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
 
     if (alert.popoverPresentationController) {
         alert.popoverPresentationController.sourceView = gesture.view;
