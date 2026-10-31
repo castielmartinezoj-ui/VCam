@@ -467,11 +467,9 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
 
-        // listener del stream: en todos los procesos (prueba de sandbox)
-        vcam_start_stream_listener();
-
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
-            // apps de camara: hooks + auto-habilitado por bandera
+            // apps de camara: listener del stream + hooks + auto-habilitado por bandera
+            vcam_start_stream_listener();
             NSFileManager *fm = [NSFileManager defaultManager];
             if ([fm fileExistsAtPath:kFlagFile] && [fm fileExistsAtPath:kSharedVideo]) {
                 g_vcamEnabled = YES;
