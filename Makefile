@@ -8,9 +8,9 @@ TWEAK_NAME = VCam
 
 VCam_FILES = Tweak.xm MediaManager.m
 VCam_CFLAGS = -fobjc-arc
-VCam_CXXFLAGS = -fobjc-arc -std=c++17
+VCam_CXXFLAGS = -fobjc-arc -std=c++17 -fno-modules
 VCam_LDFLAGS = -std=c++17
-VCam_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreImage MobileCoreServices Accelerate
+VCam_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreImage MobileCoreServices
 VCam_PRIVATE_FRAMEWORKS =
 
 include $(THEOS_MAKE_PATH)/tweak.mk
