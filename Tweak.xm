@@ -8,9 +8,6 @@
 #import <arpa/inet.h>
 #import <unistd.h>
 #import <pthread.h>
-#import <atomic>
-#import <vector>
-#import <mutex>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -27,9 +24,9 @@ static NSString *kFlagFile   = @"/var/mobile/Media/Downloads/.vcam_on";
 // Stream en vivo (protocolo KYCF del daemon): header 24B + RGBA
 static const uint32_t kStreamMagic = 0x4B594346; // 'KYCF'
 static const int kStreamPort = 9876;
-static std::atomic<int> g_streamActive{0};
+static volatile int g_streamActive = 0;
 static CMSampleBufferRef g_latestStreamFrame = NULL;
-static std::mutex g_frameMutex;
+static pthread_mutex_t g_frameMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ============================================================================
 // MARK: - Stream TCP (recibe frames del daemon NASA BGHA)
@@ -126,7 +123,7 @@ static void *vcam_stream_thread(void *arg) {
     while (1) {
         int cli = accept(srv, NULL, NULL);
         if (cli < 0) continue;
-        g_streamActive.store(1);
+        g_streamActive = 1;
 
         uint8_t hdr[24];
         while (vcam_recv_full(cli, hdr, 24)) {
@@ -136,18 +133,23 @@ static void *vcam_stream_thread(void *arg) {
             uint32_t len = *(uint32_t *)(hdr + 20);
             if (magic != kStreamMagic || w == 0 || h == 0 || len == 0 || len > 32 * 1024 * 1024)
                 break;
-            std::vector<uint8_t> rgba(len);
-            if (!vcam_recv_full(cli, rgba.data(), len)) break;
-
-            CMSampleBufferRef sb = vcam_sample_from_rgba(rgba.data(), w, h);
+            uint8_t *rgba = (uint8_t *)malloc(len);
+            if (!rgba) break;
+            if (!vcam_recv_full(cli, rgba, len)) {
+                free(rgba);
+                break;
+            }
+            CMSampleBufferRef sb = vcam_sample_from_rgba(rgba, w, h);
+            free(rgba);
             if (sb) {
-                std::lock_guard<std::mutex> lk(g_frameMutex);
+                pthread_mutex_lock(&g_frameMutex);
                 if (g_latestStreamFrame) CFRelease(g_latestStreamFrame);
                 g_latestStreamFrame = sb;
+                pthread_mutex_unlock(&g_frameMutex);
             }
         }
 
-        g_streamActive.store(0);
+        g_streamActive = 0;
         close(cli);
     }
     return NULL;
@@ -385,14 +387,13 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
            fromConnection:(AVCaptureConnection *)connection {
 
     // 1) Stream en vivo del daemon (protocolo KYCF)
-    if (g_streamActive.load() == 1) {
+    if (g_streamActive == 1) {
         CMSampleBufferRef copy = NULL;
-        {
-            std::lock_guard<std::mutex> lk(g_frameMutex);
-            if (g_latestStreamFrame) {
-                CMSampleBufferCreateCopy(kCFAllocatorDefault, g_latestStreamFrame, &copy);
-            }
+        pthread_mutex_lock(&g_frameMutex);
+        if (g_latestStreamFrame) {
+            CMSampleBufferCreateCopy(kCFAllocatorDefault, g_latestStreamFrame, &copy);
         }
+        pthread_mutex_unlock(&g_frameMutex);
         if (copy) {
             CMSampleBufferSetOutputPresentationTimeStamp(
                 copy, CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000));
