@@ -179,6 +179,12 @@ static BOOL jb_canOpenURL(id self, SEL _cmd, NSURL *url) {
 // ============================ constructor ============================
 __attribute__((constructor))
 static void jbhide_init(void) {
+    // SOLO en la app objetivo — jamas en SpringBoard/Camara (tumbaria el boot)
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bid || ![bid isEqualToString:@"com.interbank.bancamovil"]) {
+        return;
+    }
+
     real_open = make_hook((void *)open, (void *)hook_open);
     real_fopen = make_hook((void *)fopen, (void *)hook_fopen);
     real_access = make_hook((void *)access, (void *)hook_access);
