@@ -12,6 +12,10 @@ static BOOL g_vcamEnabled = NO;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
 
+// Estado compartido entre procesos (SpringBoard y apps de camara)
+static NSString *kSharedVideo = @"/var/mobile/Media/Downloads/vcam_video.mp4";
+static NSString *kFlagFile   = @"/var/mobile/Media/Downloads/.vcam_on";
+
 // ============================================================================
 // MARK: - 悬浮按钮 UI
 // ============================================================================
@@ -56,6 +60,18 @@ static void setupFloatButton() {
     [g_floatButton addGestureRecognizer:tap];
 
     g_overlayWindow = [[UIWindow alloc] initWithFrame:screen];
+    // iOS 13+: una UIWindow sin windowScene NO se renderiza — asignar la escena activa
+    UIWindowScene *activeScene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]] &&
+            s.activationState == UISceneActivationStateForegroundActive) {
+            activeScene = (UIWindowScene *)s;
+            break;
+        }
+    }
+    if (activeScene) {
+        g_overlayWindow.windowScene = activeScene;
+    }
     g_overlayWindow.windowLevel = UIWindowLevelAlert + 100;
     g_overlayWindow.hidden = NO;
     g_overlayWindow.backgroundColor = [UIColor clearColor];
@@ -104,6 +120,17 @@ static UIViewController *findTopViewController(void) {
     return topVC;
 }
 
+static void setSharedFlag(BOOL on) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (on) {
+        if (![fm fileExistsAtPath:kFlagFile]) {
+            [fm createFileAtPath:kFlagFile contents:[NSData data] attributes:nil];
+        }
+    } else {
+        [fm removeItemAtPath:kFlagFile error:nil];
+    }
+}
+
 @interface VCamImagePickerControllerDelegate : NSObject <UINavigationControllerDelegate, UIImagePickerControllerDelegate>
 @end
 
@@ -116,12 +143,13 @@ static UIViewController *findTopViewController(void) {
     NSURL *url = info[UIImagePickerControllerMediaURL];
     if (!url) return;
 
-    NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory()
-        stringByAppendingPathComponent:@"vcam_input.mp4"]];
-    [[NSFileManager defaultManager] removeItemAtURL:tempURL error:nil];
-    [[NSFileManager defaultManager] copyItemAtURL:url toURL:tempURL error:nil];
+    // Copiar el video elegido a la ruta compartida para que TODOS los procesos lo vean
+    NSURL *sharedURL = [NSURL fileURLWithPath:kSharedVideo];
+    [[NSFileManager defaultManager] removeItemAtURL:sharedURL error:nil];
+    [[NSFileManager defaultManager] copyItemAtURL:url toURL:sharedURL error:nil];
 
-    [[MediaManager sharedManager] loadMediaFromURL:tempURL];
+    setSharedFlag(YES);
+    [[MediaManager sharedManager] loadMediaFromURL:sharedURL];
     g_vcamEnabled = YES;
     [[MediaManager sharedManager] start];
     if (g_floatButton) {
@@ -162,12 +190,14 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
     [alert addAction:[UIAlertAction actionWithTitle:g_vcamEnabled ? @"关闭虚拟相机" : @"开启虚拟相机"
         style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         g_vcamEnabled = !g_vcamEnabled;
+        setSharedFlag(g_vcamEnabled);
         if (g_floatButton) {
             g_floatButton.backgroundColor = g_vcamEnabled
                 ? [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9]
                 : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
         }
         if (g_vcamEnabled) {
+            [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
             [[MediaManager sharedManager] start];
         } else {
             [[MediaManager sharedManager] stop];
@@ -248,6 +278,15 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+
+        // Auto-habilitar en CADA proceso inyectado si la bandera y el video existen
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if ([fm fileExistsAtPath:kFlagFile] && [fm fileExistsAtPath:kSharedVideo]) {
+            g_vcamEnabled = YES;
+            [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
+            [[MediaManager sharedManager] start];
+        }
+
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
             %init(VCamHooks);
         }
@@ -262,4 +301,3 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
         }
     }
 }
-
