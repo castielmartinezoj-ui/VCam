@@ -104,9 +104,31 @@ static CMSampleBufferRef vcam_sample_from_rgba(const uint8_t *rgba, uint32_t w, 
     return sb;
 }
 
+static void vcam_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    NSString *logPath = @"/var/mobile/Media/Downloads/.vcam_ctor_log";
+    NSString *entry = [NSString stringWithFormat:@"%s\n", buf];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (!fh) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath
+                                                contents:[NSData data] attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    }
+    [fh seekToEndOfFile];
+    [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh closeFile];
+}
+
 static void *vcam_stream_thread(void *arg) {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) return NULL;
+    if (srv < 0) {
+        vcam_log("socket() fallo errno=%d", errno);
+        return NULL;
+    }
     int one = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
@@ -116,9 +138,11 @@ static void *vcam_stream_thread(void *arg) {
     addr.sin_port = htons(kStreamPort);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         listen(srv, 4) != 0) {
+        vcam_log("bind/listen fallo errno=%d", errno);
         close(srv);
         return NULL;
     }
+    vcam_log("listener 9876 OK pid=%d", getpid());
 
     while (1) {
         int cli = accept(srv, NULL, NULL);
@@ -437,6 +461,8 @@ static void handleTapGesture(UITapGestureRecognizer *gesture) {
 
 %ctor {
     @autoreleasepool {
+        vcam_log("ctor pid=%d bundle=%s", getpid(),
+                 [[[NSBundle mainBundle] bundleIdentifier] UTF8String]);
         g_pickerDelegate = [[VCamImagePickerControllerDelegate alloc] init];
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
