@@ -196,6 +196,22 @@ static void vcam_start_stream_listener(void) {
 @implementation VCamFloatButton
 @end
 
+// Ventana pasante: solo el boton recibe toques, el resto atraviesa al sistema
+@interface VCamPassthroughWindow : UIWindow
+@property (nonatomic, weak) UIView *passthroughTarget;
+@end
+
+@implementation VCamPassthroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self.passthroughTarget ||
+        (hit && [hit isDescendantOfView:self.passthroughTarget])) {
+        return hit;
+    }
+    return nil;
+}
+@end
+
 static void setupFloatButton(void);
 static void setSharedFlag(BOOL on);
 
@@ -237,7 +253,8 @@ static void setupFloatButton() {
         }
     }] forControlEvents:UIControlEventTouchUpInside];
 
-    g_overlayWindow = [[UIWindow alloc] initWithFrame:screen];
+    g_overlayWindow = [[VCamPassthroughWindow alloc] initWithFrame:screen];
+    ((VCamPassthroughWindow *)g_overlayWindow).passthroughTarget = g_floatButton;
     // iOS 13+: una UIWindow sin windowScene NO se renderiza — asignar la escena activa
     UIWindowScene *activeScene = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
