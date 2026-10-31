@@ -179,10 +179,6 @@ static pid_t (*real_fork)(void);
 static pid_t hook_fork(void) {
     return -1;
 }
-static int (*real_system)(const char *);
-static int hook_system(const char *cmd) {
-    return -1;
-}
 static FILE *(*real_popen)(const char *, const char *);
 static FILE *hook_popen(const char *cmd, const char *mode) {
     return NULL;
@@ -207,7 +203,6 @@ static void jbhide_init(void) {
     MSHookFunction((void *)opendir, (void *)hook_opendir, (void **)&real_opendir);
     MSHookFunction((void *)sysctl, (void *)hook_sysctl, (void **)&real_sysctl);
     MSHookFunction((void *)fork, (void *)hook_fork, (void **)&real_fork);
-    MSHookFunction((void *)system, (void *)hook_system, (void **)&real_system);
     MSHookFunction((void *)popen, (void *)hook_popen, (void **)&real_popen);
     MSHookFunction((void *)_dyld_get_image_name, (void *)hook_dyld_image_name, (void **)&real_dyld_image_name);
 
