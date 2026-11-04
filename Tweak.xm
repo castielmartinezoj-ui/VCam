@@ -499,7 +499,8 @@ static VCamTableDS *g_tableDS = nil;
     id r = results[0];
     id prov = [r valueForKey:@"itemProvider"];
     if (prov && [prov respondsToSelector:@selector(hasItemConformingToTypeIdentifier:)]) {
-        BOOL has = (BOOL)objc_msgSend(prov, @selector(hasItemConformingToTypeIdentifier:), @"public.image");
+        BOOL has = ((BOOL (*)(id, SEL, id))objc_msgSend)(prov,
+            @selector(hasItemConformingToTypeIdentifier:), @"public.image");
         if (has) {
             void (^handler)(NSURL *, NSError *) = ^(NSURL *url, NSError *err) {
                 @autoreleasepool {
@@ -542,8 +543,9 @@ static VCamTableDS *g_tableDS = nil;
                     });
                 }
             };
-            objc_msgSend(prov, @selector(loadFileRepresentationForTypeIdentifier:completionHandler:),
-                         @"public.image", handler);
+            ((void (*)(id, SEL, id, id))objc_msgSend)(prov,
+                @selector(loadFileRepresentationForTypeIdentifier:completionHandler:),
+                @"public.image", handler);
         }
     }
 }
@@ -564,13 +566,13 @@ static void vcam_open_gallery(void) {
     }
     id cfg = [[cfgCls alloc] init];
     if (filterCls) {
-        id imgFilter = objc_msgSend(filterCls, sel_registerName("imagesFilter"));
+        id imgFilter = ((id (*)(id, SEL))objc_msgSend)(filterCls, sel_registerName("imagesFilter"));
         [cfg setValue:imgFilter forKey:@"filter"];
     }
     [cfg setValue:@1 forKey:@"selectionLimit"];
 
     id picker = objc_msgSend(pickerCls, sel_registerName("alloc"));
-    picker = objc_msgSend(picker, sel_registerName("initWithConfiguration:"), cfg);
+    picker = ((id (*)(id, SEL, id))objc_msgSend)(picker, sel_registerName("initWithConfiguration:"), cfg);
     [picker setValue:g_pickerDelegate forKey:@"delegate"];
 
     UIViewController *root = g_overlayWindow.rootViewController;
