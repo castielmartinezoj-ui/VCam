@@ -12,6 +12,8 @@
 #import <fcntl.h>
 #import <errno.h>
 #import <stdarg.h>
+#import <sys/stat.h>
+#import <string.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -20,9 +22,21 @@
 static BOOL g_vcamEnabled = NO;
 static UIWindow *g_overlayWindow = nil;
 static UIButton *g_floatButton = nil;
+static UIButton *g_imgButton = nil;
+static UIView *g_panel = nil;
 
 static NSString *kSharedVideo = @"/var/mobile/Media/Downloads/vcam_video.mp4";
 static NSString *kFlagFile   = @"/var/mobile/Media/Downloads/.vcam_on";
+static NSString *kCfgPath    = @"/var/mobile/Media/Downloads/vcam_image.cfg";
+
+// Configuración compartida SpringBoard <-> app de cámara
+// Formato: modo\nruta\nzoom\noffX\noffY
+// modo: 0=off  1=stream/video  2=imagen
+static int   g_cfgMode = 0;
+static char  g_cfgImage[1024];
+static float g_cfgZoom = 1.0;
+static float g_cfgOffX = 0.0;
+static float g_cfgOffY = 0.0;
 
 // Stream KYCF: SpringBoard recibe por TCP y comparte por shm con la app Camara
 static const uint32_t kStreamMagic = 0x4B594346; // 'KYCF'
@@ -64,6 +78,32 @@ static void vcam_log(const char *fmt, ...) {
     [fh seekToEndOfFile];
     [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
     [fh closeFile];
+}
+
+// ============================================================================
+// MARK: - Config compartida (archivo)
+// ============================================================================
+
+static void vcam_cfg_write(void) {
+    NSString *s = [NSString stringWithFormat:@"%d\n%s\n%.3f\n%.3f\n%.3f",
+                   g_cfgMode, g_cfgImage, g_cfgZoom, g_cfgOffX, g_cfgOffY];
+    [s writeToFile:kCfgPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+static void vcam_cfg_read(void) {
+    NSString *s = [NSString stringWithContentsOfFile:kCfgPath
+                                            encoding:NSUTF8StringEncoding error:nil];
+    if (!s) return;
+    NSArray *lines = [s componentsSeparatedByString:@"\n"];
+    if (lines.count >= 1) g_cfgMode = [lines[0] intValue];
+    if (lines.count >= 2) {
+        const char *c = [lines[1] UTF8String] ?: "";
+        strlcpy(g_cfgImage, c, sizeof(g_cfgImage));
+    }
+    if (lines.count >= 3) g_cfgZoom = [lines[2] floatValue];
+    if (lines.count >= 4) g_cfgOffX = [lines[3] floatValue];
+    if (lines.count >= 5) g_cfgOffY = [lines[4] floatValue];
+    if (g_cfgZoom < 0.2) g_cfgZoom = 1.0;
 }
 
 // ============================================================================
@@ -143,6 +183,85 @@ static CMSampleBufferRef vcam_sample_from_nv12(const uint8_t *nv12, uint32_t w, 
                                        fmt, &timing, &sb);
     if (fmt) CFRelease(fmt);
     CVPixelBufferRelease(pb);
+    return sb;
+}
+
+// ============================================================================
+// MARK: - Modo imagen: foto elegida + ajuste (zoom / offset)
+// ============================================================================
+
+static UIImage *g_cachedImage = nil;
+static char g_cachedPath[1024];
+static struct timespec g_cachedMtime = {0};
+
+static UIImage *vcam_image_load(void) {
+    if (g_cfgMode != 2 || g_cfgImage[0] == '\0') {
+        return nil;
+    }
+    NSString *path = [NSString stringWithUTF8String:g_cfgImage];
+    struct stat st = {0};
+    if (stat(g_cfgImage, &st) != 0) {
+        return nil;
+    }
+    if (g_cachedImage &&
+        strcmp(g_cachedPath, g_cfgImage) == 0 &&
+        g_cachedMtime.tv_sec == st.st_mtimespec.tv_sec &&
+        g_cachedMtime.tv_nsec == st.st_mtimespec.tv_nsec) {
+        return g_cachedImage;
+    }
+    UIImage *img = [UIImage imageWithContentsOfFile:path];
+    if (!img) return nil;
+    g_cachedImage = img;
+    strlcpy(g_cachedPath, g_cfgImage, sizeof(g_cachedPath));
+    g_cachedMtime = st.st_mtimespec;
+    return img;
+}
+
+// Dibuja la imagen con zoom+offset en un buffer RGBA de W x H
+static uint8_t *vcam_image_to_rgba(uint32_t W, uint32_t H, uint32_t *outW, uint32_t *outH) {
+    UIImage *img = vcam_image_load();
+    if (!img) return NULL;
+    if (W == 0 || H == 0 || W > 4096 || H > 4096) return NULL;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    // ByteOrder32Big + PremultipliedLast => memoria RGBA
+    CGContextRef ctx = CGBitmapContextCreate(NULL, W, H, 8, W * 4, cs,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+
+    CGContextSetFillColorWithColor(ctx, [UIColor blackColor].CGColor);
+    CGContextFillRect(ctx, CGRectMake(0, 0, W, H));
+
+    CGFloat iw = img.size.width, ih = img.size.height;
+    if (iw <= 0 || ih <= 0) { CGContextRelease(ctx); return NULL; }
+    CGFloat scale = MIN((CGFloat)W / iw, (CGFloat)H / ih) * g_cfgZoom;
+    CGFloat dw = iw * scale, dh = ih * scale;
+    CGFloat ox = ((CGFloat)W - dw) / 2.0 + g_cfgOffX * W;
+    CGFloat oy = ((CGFloat)H - dh) / 2.0 + g_cfgOffY * H;
+    CGContextDrawImage(ctx, CGRectMake(ox, oy, dw, dh), img.CGImage);
+
+    uint8_t *data = (uint8_t *)CGBitmapContextGetData(ctx);
+    size_t len = (size_t)W * H * 4;
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (copy) memcpy(copy, data, len);
+    CGContextRelease(ctx);
+
+    *outW = W;
+    *outH = H;
+    return copy;
+}
+
+static CMSampleBufferRef vcam_image_sample(uint32_t W, uint32_t H) {
+    uint32_t w = 0, h = 0;
+    uint8_t *rgba = vcam_image_to_rgba(W, H, &w, &h);
+    if (!rgba) return NULL;
+    size_t nv12Len = 0;
+    uint8_t *nv12 = vcam_rgba_to_nv12(rgba, w, h, &nv12Len);
+    free(rgba);
+    if (!nv12) return NULL;
+    CMSampleBufferRef sb = vcam_sample_from_nv12(nv12, w, h);
+    free(nv12);
     return sb;
 }
 
@@ -267,7 +386,7 @@ static void vcam_start_stream_listener(void) {
 }
 
 // ============================================================================
-// MARK: - 悬浮按钮 UI (ventana pasante + tap por bloque)
+// MARK: - UI: boton flotante + boton imagen + panel de ajuste
 // ============================================================================
 
 @interface VCamFloatButton : UIButton
@@ -288,12 +407,181 @@ static void vcam_start_stream_listener(void) {
         (hit && [hit isDescendantOfView:self.passthroughTarget])) {
         return hit;
     }
+    if (hit && [hit isDescendantOfView:g_panel]) {
+        return hit;
+    }
     return nil;
 }
 @end
 
 static void setupFloatButton(void);
+static void setupImgButton(void);
 static void setSharedFlag(BOOL on);
+
+// ============================================================================
+// MARK: - Tabla de seleccion de imagen (data source real)
+// ============================================================================
+
+@interface VCamTableDS : NSObject <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) NSArray *files;
+@end
+
+@implementation VCamTableDS
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    return (NSInteger)self.files.count;
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:@"c"];
+    }
+    cell.textLabel.text = self.files[(NSUInteger)ip.row];
+    cell.textLabel.font = [UIFont systemFontOfSize:13];
+    cell.textLabel.textColor = [UIColor whiteColor];
+    cell.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+    return cell;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *name = self.files[(NSUInteger)ip.row];
+    NSString *full = [@"/var/mobile/Media/Downloads/" stringByAppendingString:name];
+    strlcpy(g_cfgImage, [full UTF8String] ?: "", sizeof(g_cfgImage));
+    g_cfgMode = 2;
+    vcam_cfg_write();
+    setSharedFlag(YES);
+    g_vcamEnabled = YES;
+    if (g_floatButton) {
+        g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
+    }
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    vcam_log("imagen seleccionada: %s", g_cfgImage);
+}
+@end
+
+static VCamTableDS *g_tableDS = nil;
+
+// Panel de selección de imagen + ajuste (SpringBoard)
+static void setupImagePanel(void) {
+    if (g_panel) { g_panel.hidden = NO; return; }
+
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat pw = screen.size.width - 40;
+    CGFloat ph = 320;
+    g_panel = [[UIView alloc] initWithFrame:CGRectMake(20, 80, pw, ph)];
+    g_panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
+    g_panel.layer.cornerRadius = 14;
+    g_panel.clipsToBounds = YES;
+
+    // Lista de imagenes de Downloads
+    UITableView *table = [[UITableView alloc] initWithFrame:CGRectMake(8, 8, pw - 16, 120)
+                                                       style:UITableViewStylePlain];
+    table.tag = 9001;
+    table.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+    table.rowHeight = 36;
+    [g_panel addSubview:table];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *files = [fm contentsOfDirectoryAtPath:@"/var/mobile/Media/Downloads" error:nil];
+    NSMutableArray *images = [NSMutableArray array];
+    for (NSString *f in files) {
+        NSString *ext = [[f pathExtension] lowercaseString];
+        if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"] ||
+            [ext isEqualToString:@"png"] || [ext isEqualToString:@"heic"]) {
+            [images addObject:f];
+        }
+    }
+    // table data source simple con clase interna
+    // (se rellena con un selector personalizado abajo)
+
+    // Sliders de ajuste
+    UISlider *zoom = [[UISlider alloc] initWithFrame:CGRectMake(16, 140, pw - 32, 30)];
+    zoom.tag = 9002;
+    zoom.minimumValue = 0.5;
+    zoom.maximumValue = 3.0;
+    zoom.value = g_cfgZoom;
+    [g_panel addSubview:zoom];
+
+    UISlider *offX = [[UISlider alloc] initWithFrame:CGRectMake(16, 176, pw - 32, 30)];
+    offX.tag = 9003;
+    offX.minimumValue = -0.5;
+    offX.maximumValue = 0.5;
+    offX.value = g_cfgOffX;
+    [g_panel addSubview:offX];
+
+    UISlider *offY = [[UISlider alloc] initWithFrame:CGRectMake(16, 212, pw - 32, 30)];
+    offY.tag = 9004;
+    offY.minimumValue = -0.5;
+    offY.maximumValue = 0.5;
+    offY.value = g_cfgOffY;
+    [g_panel addSubview:offY];
+
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 132, pw - 32, 14)];
+    lbl.text = @"Zoom / Posición X / Posición Y";
+    lbl.font = [UIFont systemFontOfSize:11];
+    lbl.textColor = [UIColor whiteColor];
+    [g_panel addSubview:lbl];
+
+    UIButton *apply = [UIButton buttonWithType:UIButtonTypeSystem];
+    apply.frame = CGRectMake(16, 252, pw - 32, 42);
+    [apply setTitle:@"Aplicar imagen a la cámara" forState:UIControlStateNormal];
+    apply.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
+    [apply setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    apply.layer.cornerRadius = 8;
+    [apply addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
+        UISlider *z = (UISlider *)[g_panel viewWithTag:9002];
+        UISlider *x = (UISlider *)[g_panel viewWithTag:9003];
+        UISlider *y = (UISlider *)[g_panel viewWithTag:9004];
+        g_cfgZoom = z.value;
+        g_cfgOffX = x.value;
+        g_cfgOffY = y.value;
+        if (g_cfgImage[0] != '\0') {
+            g_cfgMode = 2; // modo imagen
+        }
+        vcam_cfg_write();
+        setSharedFlag(YES);
+        g_vcamEnabled = YES;
+        if (g_floatButton) {
+            g_floatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9];
+        }
+        g_panel.hidden = YES;
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:apply];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(pw - 48, 4, 44, 30);
+    [close setTitle:@"✕" forState:UIControlStateNormal];
+    [close addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
+        g_panel.hidden = YES;
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:close];
+
+    // Delegado real de la tabla
+    g_tableDS = [[VCamTableDS alloc] init];
+    g_tableDS.files = images;
+    table.dataSource = g_tableDS;
+    table.delegate = g_tableDS;
+    [table reloadData];
+
+    UIView *root = g_overlayWindow.rootViewController.view;
+    [root addSubview:g_panel];
+}
+
+static void setupImgButton(void) {
+    if (g_imgButton) return;
+    CGFloat btnSize = 50;
+    CGRect screen = [UIScreen mainScreen].bounds;
+    g_imgButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    g_imgButton.frame = CGRectMake(screen.size.width - btnSize - 15, 165, btnSize, btnSize);
+    g_imgButton.layer.cornerRadius = btnSize / 2.0;
+    g_imgButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.9 alpha:0.9];
+    [g_imgButton setTitle:@"🖼" forState:UIControlStateNormal];
+    g_imgButton.titleLabel.font = [UIFont systemFontOfSize:22];
+    [g_imgButton addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
+        vcam_cfg_read();
+        setupImagePanel();
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [g_overlayWindow.rootViewController.view addSubview:g_imgButton];
+}
 
 static void setupFloatButton() {
     if (g_floatButton) return;
@@ -315,26 +603,31 @@ static void setupFloatButton() {
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
 
-    // Tap directo por BLOQUE — sin gestures, sin alerta, sin selectors
+    // Tap: alterna stream/video (modo 1) <-> off (modo 0)
     [g_floatButton addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
-        g_vcamEnabled = !g_vcamEnabled;
-        setSharedFlag(g_vcamEnabled);
+        vcam_cfg_read();
+        if (g_cfgMode == 1) {
+            g_cfgMode = 0;
+            g_vcamEnabled = NO;
+            setSharedFlag(NO);
+            [[MediaManager sharedManager] stop];
+        } else {
+            g_cfgMode = 1;
+            g_vcamEnabled = YES;
+            setSharedFlag(YES);
+            [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
+            [[MediaManager sharedManager] start];
+        }
+        vcam_cfg_write();
         if (g_floatButton) {
             g_floatButton.backgroundColor = g_vcamEnabled
                 ? [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9]
                 : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
         }
-        if (g_vcamEnabled) {
-            [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
-            [[MediaManager sharedManager] start];
-        } else {
-            [[MediaManager sharedManager] stop];
-        }
     }] forControlEvents:UIControlEventTouchUpInside];
 
     g_overlayWindow = [[VCamPassthroughWindow alloc] initWithFrame:screen];
     ((VCamPassthroughWindow *)g_overlayWindow).passthroughTarget = g_floatButton;
-    // iOS 13+: asignar la escena activa o no se renderiza
     UIWindowScene *activeScene = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
         if ([s isKindOfClass:[UIWindowScene class]] &&
@@ -354,6 +647,8 @@ static void setupFloatButton() {
     rootVC.view.backgroundColor = [UIColor clearColor];
     [rootVC.view addSubview:g_floatButton];
     g_overlayWindow.rootViewController = rootVC;
+
+    setupImgButton();
 }
 
 static void setSharedFlag(BOOL on) {
@@ -368,6 +663,58 @@ static void setSharedFlag(BOOL on) {
 }
 
 // ============================================================================
+// MARK: - Overlay de imagen para Apple Camera (muestra la foto ajustada)
+// ============================================================================
+
+static UIWindow *g_camWindow = nil;
+static UIImageView *g_camImageView = nil;
+static NSTimer *g_camTimer = nil;
+
+static void vcam_cam_update(void) {
+    vcam_cfg_read();
+    if (g_cfgMode != 2 || g_cfgImage[0] == '\0') {
+        if (g_camWindow) g_camWindow.hidden = YES;
+        return;
+    }
+    UIImage *img = vcam_image_load();
+    if (!img) {
+        if (g_camWindow) g_camWindow.hidden = YES;
+        return;
+    }
+    if (!g_camWindow) {
+        CGRect screen = [UIScreen mainScreen].bounds;
+        g_camWindow = [[VCamPassthroughWindow alloc] initWithFrame:screen];
+        ((VCamPassthroughWindow *)g_camWindow).passthroughTarget = nil; // todo pasa
+        UIWindowScene *activeScene = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]] &&
+                s.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)s;
+                break;
+            }
+        }
+        if (activeScene) g_camWindow.windowScene = activeScene;
+        g_camWindow.windowLevel = UIWindowLevelNormal - 1; // debajo de los controles
+        g_camWindow.backgroundColor = [UIColor blackColor];
+        g_camWindow.userInteractionEnabled = NO;
+
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = [UIColor blackColor];
+        g_camImageView = [[UIImageView alloc] initWithFrame:g_camWindow.bounds];
+        g_camImageView.contentMode = UIViewContentModeScaleAspectFill;
+        g_camImageView.clipsToBounds = YES;
+        [vc.view addSubview:g_camImageView];
+        g_camWindow.rootViewController = vc;
+    }
+    g_camImageView.image = img;
+    // Ajuste: zoom + offset sobre el llenado
+    g_camImageView.transform = CGAffineTransformMakeTranslation(g_cfgOffX * g_camWindow.bounds.size.width,
+                                                                 g_cfgOffY * g_camWindow.bounds.size.height);
+    g_camImageView.transform = CGAffineTransformScale(g_camImageView.transform, g_cfgZoom, g_cfgZoom);
+    g_camWindow.hidden = NO;
+}
+
+// ============================================================================
 // MARK: - Hooks
 // ============================================================================
 
@@ -378,7 +725,24 @@ static void setSharedFlag(BOOL on) {
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection {
 
-    // 1) Frame fresco desde la memoria compartida (stream en vivo del daemon)
+    vcam_cfg_read();
+
+    // 1) Modo imagen: la foto elegida con ajuste
+    if (g_cfgMode == 2) {
+        CVPixelBufferRef inPB = CMSampleBufferGetImageBuffer(sampleBuffer);
+        size_t W = inPB ? CVPixelBufferGetWidth(inPB) : 540;
+        size_t H = inPB ? CVPixelBufferGetHeight(inPB) : 405;
+        if (W == 0) W = 540;
+        if (H == 0) H = 405;
+        CMSampleBufferRef imgFrame = vcam_image_sample((uint32_t)W, (uint32_t)H);
+        if (imgFrame) {
+            %orig(output, imgFrame, connection);
+            CFRelease(imgFrame);
+            return;
+        }
+    }
+
+    // 2) Stream en vivo (shm del daemon)
     CMSampleBufferRef shmFrame = vcam_shm_read_latest();
     if (shmFrame) {
         %orig(output, shmFrame, connection);
@@ -386,7 +750,7 @@ static void setSharedFlag(BOOL on) {
         return;
     }
 
-    // 2) Modo archivo (video del boton)
+    // 3) Modo video (boton flotante)
     if (g_vcamEnabled && [[MediaManager sharedManager] isRunning]) {
         CMSampleBufferRef fakeFrame = [[MediaManager sharedManager] nextVideoFrame];
         if (fakeFrame) {
@@ -411,12 +775,13 @@ static void setSharedFlag(BOOL on) {
                  [[[NSBundle mainBundle] bundleIdentifier] UTF8String]);
 
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        vcam_cfg_read();
 
         if ([bundleID isEqualToString:@"com.apple.springboard"]) {
-            // SpringBoard: listener TCP (puede bindear) + boton flotante
+            // SpringBoard: listener TCP + botones + panel
             vcam_start_stream_listener();
             NSFileManager *fm = [NSFileManager defaultManager];
-            if ([fm fileExistsAtPath:kFlagFile] && [fm fileExistsAtPath:kSharedVideo]) {
+            if ([fm fileExistsAtPath:kFlagFile] && [fm fileExistsAtPath:kSharedVideo] && g_cfgMode != 2) {
                 g_vcamEnabled = YES;
                 [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
                 [[MediaManager sharedManager] start];
@@ -428,14 +793,25 @@ static void setSharedFlag(BOOL on) {
                     }
                 });
         } else {
-            // apps de camara: hooks + auto-habilitado por bandera (sin sockets)
+            // apps de camara: hooks + overlay para Apple Camera
             NSFileManager *fm = [NSFileManager defaultManager];
-            if ([fm fileExistsAtPath:kFlagFile] && [fm fileExistsAtPath:kSharedVideo]) {
+            if ([fm fileExistsAtPath:kFlagFile] && g_cfgMode != 2) {
                 g_vcamEnabled = YES;
                 [[MediaManager sharedManager] loadMediaFromURL:[NSURL fileURLWithPath:kSharedVideo]];
                 [[MediaManager sharedManager] start];
             }
             %init(VCamHooks);
+
+            if ([bundleID isEqualToString:@"com.apple.camera"]) {
+                // Apple Camera usa pipeline privado: la imagen va por overlay
+                g_camTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                              repeats:YES
+                                                                block:^(NSTimer *t) {
+                    @autoreleasepool {
+                        vcam_cam_update();
+                    }
+                }];
+            }
         }
     }
 }
