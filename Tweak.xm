@@ -869,6 +869,51 @@ static NSTimer *g_camTimer = nil;
 static AVQueuePlayer *g_loopPlayer = nil;
 static AVPlayerLooper *g_looper = nil;
 
+// ============================================================================
+// MARK: - Gestos con los dedos (arrastrar = posicion, pellizco = zoom)
+// ============================================================================
+
+static void vcam_preview_update(void);
+
+@interface VCamGestureHandler : NSObject
+@end
+
+@implementation VCamGestureHandler
+- (void)onPan:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    if (!v || v.bounds.size.width == 0) return;
+    CGPoint t = [g translationInView:v];
+    g_cfgOffX += t.x / v.bounds.size.width;
+    g_cfgOffY += t.y / v.bounds.size.height;
+    if (g_cfgOffX < -0.9) g_cfgOffX = -0.9;
+    if (g_cfgOffX > 0.9) g_cfgOffX = 0.9;
+    if (g_cfgOffY < -0.9) g_cfgOffY = -0.9;
+    if (g_cfgOffY > 0.9) g_cfgOffY = 0.9;
+    [g setTranslation:CGPointZero inView:v];
+    if (g.state == UIGestureRecognizerStateEnded) {
+        vcam_cfg_write();
+        vcam_log("gesto: posicion x=%.2f y=%.2f guardada", g_cfgOffX, g_cfgOffY);
+    } else {
+        vcam_preview_update();
+    }
+}
+- (void)onPinch:(UIPinchGestureRecognizer *)g {
+    g_cfgZoom *= g.scale;
+    if (g_cfgZoom < 0.5) g_cfgZoom = 0.5;
+    if (g_cfgZoom > 3.0) g_cfgZoom = 3.0;
+    g.scale = 1.0;
+    if (g.state == UIGestureRecognizerStateEnded) {
+        vcam_cfg_write();
+        vcam_log("gesto: zoom %.2f guardado", g_cfgZoom);
+    } else {
+        vcam_preview_update();
+    }
+}
+@end
+
+static VCamGestureHandler *g_gestureHandler = nil;
+static NSMutableSet *g_gestureViews = nil;
+
 static void vcam_preview_update(void) {
     vcam_cfg_read();
     if (!g_previewLayers) return;
@@ -887,6 +932,28 @@ static void vcam_preview_update(void) {
     }
 
     for (AVCaptureVideoPreviewLayer *pl in g_previewLayers) {
+        // pegar gestos al view que aloja el preview (una sola vez)
+        id delegate = pl.delegate;
+        if (delegate && [delegate isKindOfClass:[UIView class]]) {
+            UIView *host = (UIView *)delegate;
+            if (!g_gestureViews) g_gestureViews = [NSMutableSet set];
+            if (![g_gestureViews containsObject:host]) {
+                if (!g_gestureHandler) g_gestureHandler = [[VCamGestureHandler alloc] init];
+                UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+                    initWithTarget:g_gestureHandler action:@selector(onPan:)];
+                pan.minimumNumberOfTouches = 1;
+                pan.maximumNumberOfTouches = 1;
+                pan.cancelsTouchesInView = NO;
+                [host addGestureRecognizer:pan];
+                UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
+                    initWithTarget:g_gestureHandler action:@selector(onPinch:)];
+                pinch.cancelsTouchesInView = NO;
+                [host addGestureRecognizer:pinch];
+                [g_gestureViews addObject:host];
+                vcam_log("gestos: pegados al view del preview (%p)", (__bridge void *)host);
+            }
+        }
+
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         for (CALayer *sub in pl.sublayers) {
