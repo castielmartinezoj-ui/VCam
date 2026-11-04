@@ -14,6 +14,7 @@
 #import <stdarg.h>
 #import <sys/stat.h>
 #import <string.h>
+#import <PhotosUI/PhotosUI.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -483,6 +484,86 @@ static void setSharedFlag(BOOL on);
 
 static VCamTableDS *g_tableDS = nil;
 
+// ============================================================================
+// MARK: - Galeria (PHPicker) para elegir foto del carrete
+// ============================================================================
+
+@interface VCamPickerDelegate : NSObject <PHPickerViewControllerDelegate>
+@end
+
+@implementation VCamPickerDelegate
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    vcam_log("picker: termino con %lu resultados", (unsigned long)results.count);
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) return;
+    PHPickerResult *r = results[0];
+    NSItemProvider *prov = r.itemProvider;
+    if ([prov hasItemConformingToTypeIdentifier:@"public.image"]) {
+        [prov loadFileRepresentationForTypeIdentifier:@"public.image"
+                                    completionHandler:^(NSURL *url, NSError *err) {
+            @autoreleasepool {
+                if (!url || err) {
+                    vcam_log("picker: error cargando imagen: %s",
+                             [err.localizedDescription UTF8String]);
+                    return;
+                }
+                NSString *dest = @"/var/mobile/Media/Downloads/vcam_picked.jpg";
+                NSError *copyErr = nil;
+                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:url.path toPath:dest error:&copyErr];
+                vcam_log("picker: copiada a Downloads %s (%s)",
+                         ok ? "OK" : "FALLO",
+                         copyErr ? [copyErr.localizedDescription UTF8String] : "-");
+                if (!ok) return;
+                strlcpy(g_cfgImage, [dest UTF8String] ?: "", sizeof(g_cfgImage));
+                g_cfgMode = 2;
+                vcam_cfg_write();
+                setSharedFlag(YES);
+                g_vcamEnabled = YES;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @autoreleasepool {
+                        if (g_tableDS) {
+                            NSFileManager *fm = [NSFileManager defaultManager];
+                            NSArray *files = [fm contentsOfDirectoryAtPath:@"/var/mobile/Media/Downloads" error:nil];
+                            NSMutableArray *images = [NSMutableArray array];
+                            for (NSString *f in files) {
+                                NSString *ext = [[f pathExtension] lowercaseString];
+                                if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"] ||
+                                    [ext isEqualToString:@"png"] || [ext isEqualToString:@"heic"]) {
+                                    [images addObject:f];
+                                }
+                            }
+                            g_tableDS.files = images;
+                            UITableView *table = (UITableView *)[g_panel viewWithTag:9001];
+                            if (table) [table reloadData];
+                        }
+                    }
+                });
+            }
+        }];
+    }
+}
+@end
+
+static VCamPickerDelegate *g_pickerDelegate = nil;
+
+static void vcam_open_gallery(void) {
+    vcam_log("galeria: abriendo PHPicker");
+    if (!g_pickerDelegate) g_pickerDelegate = [[VCamPickerDelegate alloc] init];
+    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
+    cfg.filter = [PHPickerFilter imagesFilter];
+    cfg.selectionLimit = 1;
+    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:cfg];
+    picker.delegate = g_pickerDelegate;
+    UIViewController *root = g_overlayWindow.rootViewController;
+    if (root) {
+        g_panel.hidden = YES;
+        [root presentViewController:picker animated:YES completion:^{
+            vcam_log("galeria: presentada");
+        }];
+    }
+}
+
 // Panel de selección de imagen + ajuste (SpringBoard)
 static void setupImagePanel(void) {
     vcam_log("panel: abriendo (modo=%d)", g_cfgMode);
@@ -503,6 +584,7 @@ static void setupImagePanel(void) {
             UITableView *table = (UITableView *)[g_panel viewWithTag:9001];
             if (table) [table reloadData];
         }
+        vcam_log("panel: refrescado con %lu imagenes en Downloads", (unsigned long)images.count);
         UISwitch *sw = (UISwitch *)[g_panel viewWithTag:9005];
         if (sw) sw.on = (g_cfgMode == 1);
         g_panel.hidden = NO;
@@ -511,7 +593,7 @@ static void setupImagePanel(void) {
 
     CGRect screen = [UIScreen mainScreen].bounds;
     CGFloat pw = screen.size.width - 40;
-    CGFloat ph = 380;
+    CGFloat ph = 396;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(20, 80, pw, ph)];
     g_panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
     g_panel.layer.cornerRadius = 14;
@@ -552,8 +634,20 @@ static void setupImagePanel(void) {
     swLbl.textColor = [UIColor whiteColor];
     [g_panel addSubview:swLbl];
 
+    // Boton galeria (carrete del telefono)
+    UIButton *gallery = [UIButton buttonWithType:UIButtonTypeSystem];
+    gallery.frame = CGRectMake(16, 44, pw - 32, 36);
+    [gallery setTitle:@"📱 Elegir foto de la Galería" forState:UIControlStateNormal];
+    gallery.backgroundColor = [UIColor colorWithRed:0.55 green:0.35 blue:0.9 alpha:1.0];
+    [gallery setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    gallery.layer.cornerRadius = 8;
+    [gallery addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
+        vcam_open_gallery();
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:gallery];
+
     // Lista de imagenes de Downloads
-    UITableView *table = [[UITableView alloc] initWithFrame:CGRectMake(8, 44, pw - 16, 120)
+    UITableView *table = [[UITableView alloc] initWithFrame:CGRectMake(8, 88, pw - 16, 100)
                                                        style:UITableViewStylePlain];
     table.tag = 9001;
     table.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
@@ -572,35 +666,35 @@ static void setupImagePanel(void) {
     }
 
     // Sliders de ajuste
-    UISlider *zoom = [[UISlider alloc] initWithFrame:CGRectMake(16, 176, pw - 32, 30)];
+    UISlider *zoom = [[UISlider alloc] initWithFrame:CGRectMake(16, 198, pw - 32, 30)];
     zoom.tag = 9002;
     zoom.minimumValue = 0.5;
     zoom.maximumValue = 3.0;
     zoom.value = g_cfgZoom;
     [g_panel addSubview:zoom];
 
-    UISlider *offX = [[UISlider alloc] initWithFrame:CGRectMake(16, 212, pw - 32, 30)];
+    UISlider *offX = [[UISlider alloc] initWithFrame:CGRectMake(16, 234, pw - 32, 30)];
     offX.tag = 9003;
     offX.minimumValue = -0.5;
     offX.maximumValue = 0.5;
     offX.value = g_cfgOffX;
     [g_panel addSubview:offX];
 
-    UISlider *offY = [[UISlider alloc] initWithFrame:CGRectMake(16, 248, pw - 32, 30)];
+    UISlider *offY = [[UISlider alloc] initWithFrame:CGRectMake(16, 270, pw - 32, 30)];
     offY.tag = 9004;
     offY.minimumValue = -0.5;
     offY.maximumValue = 0.5;
     offY.value = g_cfgOffY;
     [g_panel addSubview:offY];
 
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 168, pw - 32, 14)];
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, pw - 32, 14)];
     lbl.text = @"Zoom / Posición X / Posición Y";
     lbl.font = [UIFont systemFontOfSize:11];
     lbl.textColor = [UIColor whiteColor];
     [g_panel addSubview:lbl];
 
     UIButton *apply = [UIButton buttonWithType:UIButtonTypeSystem];
-    apply.frame = CGRectMake(16, 288, pw - 32, 42);
+    apply.frame = CGRectMake(16, 306, pw - 32, 42);
     [apply setTitle:@"Aplicar imagen a la cámara" forState:UIControlStateNormal];
     apply.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
     [apply setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -628,7 +722,7 @@ static void setupImagePanel(void) {
     [g_panel addSubview:apply];
 
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(pw - 48, 336, 44, 30);
+    close.frame = CGRectMake(pw - 48, 354, 44, 30);
     [close setTitle:@"✕" forState:UIControlStateNormal];
     [close addAction:[UIAction actionWithHandler:^(__kindof UIAction *act) {
         vcam_log("panel: cerrado");
