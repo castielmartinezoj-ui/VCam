@@ -571,7 +571,7 @@ static void vcam_open_gallery(void) {
     }
     [cfg setValue:@1 forKey:@"selectionLimit"];
 
-    id picker = objc_msgSend(pickerCls, sel_registerName("alloc"));
+    id picker = ((id (*)(id, SEL))objc_msgSend)(pickerCls, sel_registerName("alloc"));
     picker = ((id (*)(id, SEL, id))objc_msgSend)(picker, sel_registerName("initWithConfiguration:"), cfg);
     [picker setValue:g_pickerDelegate forKey:@"delegate"];
 
