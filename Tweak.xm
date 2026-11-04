@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <objc/message.h>
 #import <substrate.h>
 #import "MediaManager.h"
 #import <sys/socket.h>
@@ -14,7 +15,6 @@
 #import <stdarg.h>
 #import <sys/stat.h>
 #import <string.h>
-#import <PhotosUI/PhotosUI.h>
 
 // ============================================================================
 // MARK: - 全局状态
@@ -485,62 +485,66 @@ static void setSharedFlag(BOOL on);
 static VCamTableDS *g_tableDS = nil;
 
 // ============================================================================
-// MARK: - Galeria (PHPicker) para elegir foto del carrete
+// MARK: - Galeria (PHPicker dinamico, sin importar PhotosUI)
 // ============================================================================
 
-@interface VCamPickerDelegate : NSObject <PHPickerViewControllerDelegate>
+@interface VCamPickerDelegate : NSObject
 @end
 
 @implementation VCamPickerDelegate
-- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+- (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     vcam_log("picker: termino con %lu resultados", (unsigned long)results.count);
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (results.count == 0) return;
-    PHPickerResult *r = results[0];
-    NSItemProvider *prov = r.itemProvider;
-    if ([prov hasItemConformingToTypeIdentifier:@"public.image"]) {
-        [prov loadFileRepresentationForTypeIdentifier:@"public.image"
-                                    completionHandler:^(NSURL *url, NSError *err) {
-            @autoreleasepool {
-                if (!url || err) {
-                    vcam_log("picker: error cargando imagen: %s",
-                             [err.localizedDescription UTF8String]);
-                    return;
-                }
-                NSString *dest = @"/var/mobile/Media/Downloads/vcam_picked.jpg";
-                NSError *copyErr = nil;
-                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
-                BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:url.path toPath:dest error:&copyErr];
-                vcam_log("picker: copiada a Downloads %s (%s)",
-                         ok ? "OK" : "FALLO",
-                         copyErr ? [copyErr.localizedDescription UTF8String] : "-");
-                if (!ok) return;
-                strlcpy(g_cfgImage, [dest UTF8String] ?: "", sizeof(g_cfgImage));
-                g_cfgMode = 2;
-                vcam_cfg_write();
-                setSharedFlag(YES);
-                g_vcamEnabled = YES;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    @autoreleasepool {
-                        if (g_tableDS) {
-                            NSFileManager *fm = [NSFileManager defaultManager];
-                            NSArray *files = [fm contentsOfDirectoryAtPath:@"/var/mobile/Media/Downloads" error:nil];
-                            NSMutableArray *images = [NSMutableArray array];
-                            for (NSString *f in files) {
-                                NSString *ext = [[f pathExtension] lowercaseString];
-                                if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"] ||
-                                    [ext isEqualToString:@"png"] || [ext isEqualToString:@"heic"]) {
-                                    [images addObject:f];
-                                }
-                            }
-                            g_tableDS.files = images;
-                            UITableView *table = (UITableView *)[g_panel viewWithTag:9001];
-                            if (table) [table reloadData];
-                        }
+    id r = results[0];
+    id prov = [r valueForKey:@"itemProvider"];
+    if (prov && [prov respondsToSelector:@selector(hasItemConformingToTypeIdentifier:)]) {
+        BOOL has = (BOOL)objc_msgSend(prov, @selector(hasItemConformingToTypeIdentifier:), @"public.image");
+        if (has) {
+            void (^handler)(NSURL *, NSError *) = ^(NSURL *url, NSError *err) {
+                @autoreleasepool {
+                    if (!url || err) {
+                        vcam_log("picker: error cargando imagen: %s",
+                                 [err.localizedDescription UTF8String]);
+                        return;
                     }
-                });
-            }
-        }];
+                    NSString *dest = @"/var/mobile/Media/Downloads/vcam_picked.jpg";
+                    NSError *copyErr = nil;
+                    [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                    BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:url.path toPath:dest error:&copyErr];
+                    vcam_log("picker: copiada a Downloads %s (%s)",
+                             ok ? "OK" : "FALLO",
+                             copyErr ? [copyErr.localizedDescription UTF8String] : "-");
+                    if (!ok) return;
+                    strlcpy(g_cfgImage, [dest UTF8String] ?: "", sizeof(g_cfgImage));
+                    g_cfgMode = 2;
+                    vcam_cfg_write();
+                    setSharedFlag(YES);
+                    g_vcamEnabled = YES;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        @autoreleasepool {
+                            if (g_tableDS) {
+                                NSFileManager *fm = [NSFileManager defaultManager];
+                                NSArray *files = [fm contentsOfDirectoryAtPath:@"/var/mobile/Media/Downloads" error:nil];
+                                NSMutableArray *images = [NSMutableArray array];
+                                for (NSString *f in files) {
+                                    NSString *ext = [[f pathExtension] lowercaseString];
+                                    if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"] ||
+                                        [ext isEqualToString:@"png"] || [ext isEqualToString:@"heic"]) {
+                                        [images addObject:f];
+                                    }
+                                }
+                                g_tableDS.files = images;
+                                UITableView *table = (UITableView *)[g_panel viewWithTag:9001];
+                                if (table) [table reloadData];
+                            }
+                        }
+                    });
+                }
+            };
+            objc_msgSend(prov, @selector(loadFileRepresentationForTypeIdentifier:completionHandler:),
+                         @"public.image", handler);
+        }
     }
 }
 @end
@@ -550,11 +554,25 @@ static VCamPickerDelegate *g_pickerDelegate = nil;
 static void vcam_open_gallery(void) {
     vcam_log("galeria: abriendo PHPicker");
     if (!g_pickerDelegate) g_pickerDelegate = [[VCamPickerDelegate alloc] init];
-    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
-    cfg.filter = [PHPickerFilter imagesFilter];
-    cfg.selectionLimit = 1;
-    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:cfg];
-    picker.delegate = g_pickerDelegate;
+
+    Class cfgCls = NSClassFromString(@"PHPickerConfiguration");
+    Class pickerCls = NSClassFromString(@"PHPickerViewController");
+    Class filterCls = NSClassFromString(@"PHPickerFilter");
+    if (!cfgCls || !pickerCls) {
+        vcam_log("galeria: PHPicker no disponible en este iOS");
+        return;
+    }
+    id cfg = [[cfgCls alloc] init];
+    if (filterCls) {
+        id imgFilter = objc_msgSend(filterCls, sel_registerName("imagesFilter"));
+        [cfg setValue:imgFilter forKey:@"filter"];
+    }
+    [cfg setValue:@1 forKey:@"selectionLimit"];
+
+    id picker = objc_msgSend(pickerCls, sel_registerName("alloc"));
+    picker = objc_msgSend(picker, sel_registerName("initWithConfiguration:"), cfg);
+    [picker setValue:g_pickerDelegate forKey:@"delegate"];
+
     UIViewController *root = g_overlayWindow.rootViewController;
     if (root) {
         g_panel.hidden = YES;
