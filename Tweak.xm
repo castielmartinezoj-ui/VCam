@@ -830,65 +830,97 @@ static void setSharedFlag(BOOL on) {
 }
 
 // ============================================================================
-// MARK: - Overlay de imagen para Apple Camera (muestra la foto ajustada)
+// MARK: - Overlay DENTRO del preview de Apple Camera
+// La imagen/video se inyecta como sublayer del AVCaptureVideoPreviewLayer:
+// el feed real queda tapado, los controles de la app siguen visibles.
 // ============================================================================
 
-static UIWindow *g_camWindow = nil;
-static UIImageView *g_camImageView = nil;
+static NSMutableArray *g_previewLayers = nil;   // AVCaptureVideoPreviewLayer registradas
 static NSTimer *g_camTimer = nil;
 
-static void vcam_cam_update(void) {
+@interface AVCaptureVideoPreviewLayer (VCamPreview)
+- (void)vcam_preview_attach;
+@end
+
+@implementation AVCaptureVideoPreviewLayer (VCamPreview)
+- (void)vcam_preview_attach {
+    if (!g_previewLayers) g_previewLayers = [NSMutableArray array];
+    if ([g_previewLayers containsObject:self]) return;
+    [g_previewLayers addObject:self];
+
+    // capa de imagen (modo 2)
+    CALayer *img = [CALayer layer];
+    img.name = @"vcam_img";
+    img.contentsGravity = kCAGravityResizeAspectFill;
+    img.hidden = YES;
+    [self addSublayer:img];
+
+    // capa de video en loop (modo 1)
+    AVPlayerLayer *vid = [AVPlayerLayer layer];
+    vid.name = @"vcam_vid";
+    vid.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    vid.hidden = YES;
+    [self addSublayer:vid];
+
+    vcam_log("preview-layer: adjuntada (%p)", (__bridge void *)self);
+}
+@end
+
+static AVQueuePlayer *g_loopPlayer = nil;
+static AVPlayerLooper *g_looper = nil;
+
+static void vcam_preview_update(void) {
     vcam_cfg_read();
-    if (g_cfgMode != 2 || g_cfgImage[0] == '\0') {
-        if (g_camWindow && !g_camWindow.hidden) {
-            g_camWindow.hidden = YES;
-            vcam_log("cam-overlay: oculto (modo=%d)", g_cfgMode);
+    if (!g_previewLayers) return;
+
+    if (g_cfgMode == 1) {
+        // asegurar loop de video
+        if (!g_loopPlayer) {
+            NSURL *url = [NSURL fileURLWithPath:kSharedVideo];
+            AVURLAsset *asset = [AVURLAsset assetWithURL:url];
+            AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+            g_loopPlayer = [AVQueuePlayer queuePlayerWithItems:@[item]];
+            g_looper = [AVPlayerLooper playerLooperWithPlayer:g_loopPlayer templateItem:item];
+            [g_loopPlayer play];
+            vcam_log("preview-layer: video loop iniciado");
         }
-        return;
     }
-    UIImage *img = vcam_image_load();
-    if (!img) {
-        if (g_camWindow && !g_camWindow.hidden) {
-            g_camWindow.hidden = YES;
-        }
-        vcam_log("cam-overlay: imagen no carga: %s", g_cfgImage);
-        return;
-    }
-    if (!g_camWindow) {
-        CGRect screen = [UIScreen mainScreen].bounds;
-        g_camWindow = [[VCamPassthroughWindow alloc] initWithFrame:screen];
-        ((VCamPassthroughWindow *)g_camWindow).passthroughTarget = nil; // todo pasa
-        UIWindowScene *activeScene = nil;
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]] &&
-                s.activationState == UISceneActivationStateForegroundActive) {
-                activeScene = (UIWindowScene *)s;
-                break;
+
+    for (AVCaptureVideoPreviewLayer *pl in g_previewLayers) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (CALayer *sub in pl.sublayers) {
+            if ([sub isKindOfClass:[AVPlayerLayer class]]) {
+                AVPlayerLayer *vid = (AVPlayerLayer *)sub;
+                vid.frame = pl.bounds;
+                vid.hidden = (g_cfgMode != 1);
+                if (g_cfgMode == 1 && vid.player == nil) vid.player = g_loopPlayer;
+            } else if ([sub.name isEqualToString:@"vcam_img"]) {
+                CALayer *img = sub;
+                img.frame = pl.bounds;
+                if (g_cfgMode == 2) {
+                    UIImage *u = vcam_image_load();
+                    if (u) {
+                        img.contents = (__bridge id)u.CGImage;
+                        img.contentsScale = [UIScreen mainScreen].scale;
+                        img.hidden = NO;
+                        img.anchorPoint = CGPointMake(0.5, 0.5);
+                        img.position = CGPointMake(pl.bounds.size.width / 2.0,
+                                                   pl.bounds.size.height / 2.0);
+                        CGAffineTransform t = CGAffineTransformMakeTranslation(
+                            g_cfgOffX * pl.bounds.size.width,
+                            g_cfgOffY * pl.bounds.size.height);
+                        img.affineTransform = CGAffineTransformScale(t, g_cfgZoom, g_cfgZoom);
+                    } else {
+                        img.hidden = YES;
+                    }
+                } else {
+                    img.hidden = YES;
+                }
             }
         }
-        if (activeScene) g_camWindow.windowScene = activeScene;
-        g_camWindow.windowLevel = UIWindowLevelAlert - 1; // encima de la app, bajo alertas
-        g_camWindow.backgroundColor = [UIColor blackColor];
-        g_camWindow.userInteractionEnabled = NO;
-
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view.backgroundColor = [UIColor blackColor];
-        g_camImageView = [[UIImageView alloc] initWithFrame:g_camWindow.bounds];
-        g_camImageView.contentMode = UIViewContentModeScaleAspectFill;
-        g_camImageView.clipsToBounds = YES;
-        [vc.view addSubview:g_camImageView];
-        g_camWindow.rootViewController = vc;
-        vcam_log("cam-overlay: ventana creada");
+        [CATransaction commit];
     }
-    g_camImageView.image = img;
-    // Ajuste: zoom + offset sobre el llenado
-    g_camImageView.transform = CGAffineTransformMakeTranslation(g_cfgOffX * g_camWindow.bounds.size.width,
-                                                                 g_cfgOffY * g_camWindow.bounds.size.height);
-    g_camImageView.transform = CGAffineTransformScale(g_camImageView.transform, g_cfgZoom, g_cfgZoom);
-    if (g_camWindow.hidden) {
-        vcam_log("cam-overlay: mostrando %s zoom=%.2f", g_cfgImage, g_cfgZoom);
-    }
-    g_camWindow.hidden = NO;
 }
 
 // ============================================================================
@@ -896,6 +928,20 @@ static void vcam_cam_update(void) {
 // ============================================================================
 
 %group VCamHooks
+
+// Inyecta imagen/video como sublayer del preview real de la camara
+%hook AVCaptureVideoPreviewLayer
+- (id)initWithSession:(AVCaptureSession *)session {
+    id r = %orig;
+    [self vcam_preview_attach];
+    return r;
+}
+- (id)initWithLayer:(id)layer {
+    id r = %orig;
+    [self vcam_preview_attach];
+    return r;
+}
+%end
 
 %hook NSObject
 - (void)captureOutput:(AVCaptureOutput *)output
@@ -992,15 +1038,16 @@ static void vcam_cam_update(void) {
             %init(VCamHooks);
 
             if ([bundleID isEqualToString:@"com.apple.camera"]) {
-                // Apple Camera usa pipeline privado: la imagen va por overlay
+                // Apple Camera usa pipeline privado: imagen/video van como
+                // sublayer del AVCaptureVideoPreviewLayer (controles intactos)
                 g_camTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                               repeats:YES
                                                                 block:^(NSTimer *t) {
                     @autoreleasepool {
-                        vcam_cam_update();
+                        vcam_preview_update();
                     }
                 }];
-                vcam_log("cam-overlay: timer 0.5s armado en com.apple.camera");
+                vcam_log("cam-preview: timer 0.5s armado en com.apple.camera");
             }
         }
     }
