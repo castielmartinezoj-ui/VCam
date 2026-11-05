@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     name: Build iOS Tweak
-    runs-on: macos-15
+    runs-on: macos-13
 
     steps:
     - name: Checkout
