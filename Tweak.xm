@@ -267,6 +267,29 @@ static CMSampleBufferRef vcam_image_sample(uint32_t W, uint32_t H) {
 }
 
 // ============================================================================
+// MARK: - Captura REAL: foto y video quedan reemplazados (no solo el visor)
+// ============================================================================
+
+static NSURL *g_lastRecordingURL = nil;
+
+static NSData *vcam_photo_jpeg(void) {
+    if (g_cfgMode != 2) return nil;
+    UIImage *img = vcam_image_load();
+    if (!img) return nil;
+    return UIImageJPEGRepresentation(img, 0.92);
+}
+
+static CVPixelBufferRef vcam_photo_pb(void) {
+    if (g_cfgMode != 2) return NULL;
+    CMSampleBufferRef sb = vcam_image_sample(1920, 1080);
+    if (!sb) return NULL;
+    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sb);
+    if (pb) CVPixelBufferRetain(pb);
+    CFRelease(sb);
+    return pb;
+}
+
+// ============================================================================
 // MARK: - Shm (escritor: SpringBoard / lector: app Camara)
 // ============================================================================
 
@@ -848,6 +871,13 @@ static NSTimer *g_camTimer = nil;
     if ([g_previewLayers containsObject:self]) return;
     [g_previewLayers addObject:self];
 
+    // fondo negro opaco: tapa el feed real cuando la imagen se achica
+    CALayer *bg = [CALayer layer];
+    bg.name = @"vcam_bg";
+    bg.backgroundColor = [UIColor blackColor].CGColor;
+    bg.hidden = YES;
+    [self addSublayer:bg];
+
     // capa de imagen (modo 2)
     CALayer *img = [CALayer layer];
     img.name = @"vcam_img";
@@ -962,6 +992,9 @@ static void vcam_preview_update(void) {
                 vid.frame = pl.bounds;
                 vid.hidden = (g_cfgMode != 1);
                 if (g_cfgMode == 1 && vid.player == nil) vid.player = g_loopPlayer;
+            } else if ([sub.name isEqualToString:@"vcam_bg"]) {
+                sub.frame = pl.bounds;
+                sub.hidden = (g_cfgMode == 0);
             } else if ([sub.name isEqualToString:@"vcam_img"]) {
                 CALayer *img = sub;
                 img.frame = pl.bounds;
@@ -1007,6 +1040,54 @@ static void vcam_preview_update(void) {
     id r = %orig;
     [self vcam_preview_attach];
     return r;
+}
+%end
+
+// La FOTO capturada queda reemplazada por la imagen inyectada
+%hook AVCapturePhoto
+- (NSData *)fileDataRepresentation {
+    NSData *d = vcam_photo_jpeg();
+    if (d) return d;
+    return %orig;
+}
+- (CGImageRef)CGImageRepresentation {
+    if (g_cfgMode == 2) {
+        UIImage *img = vcam_image_load();
+        if (img) return CGImageRetain(img.CGImage);
+    }
+    return %orig;
+}
+- (CVPixelBufferRef)pixelBuffer {
+    CVPixelBufferRef pb = vcam_photo_pb();
+    if (pb) return pb;
+    return %orig;
+}
+%end
+
+// El VIDEO grabado queda reemplazado por vcam_video.mp4
+%hook AVCaptureMovieFileOutput
+- (void)startRecordingToOutputFileURL:(NSURL *)fileURL recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
+    g_lastRecordingURL = fileURL;
+    %orig;
+}
+- (void)stopRecording {
+    %orig;
+    NSURL *url = g_lastRecordingURL;
+    if (g_cfgMode == 1 && url) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                @autoreleasepool {
+                    NSFileManager *fm = [NSFileManager defaultManager];
+                    if ([fm fileExistsAtPath:kSharedVideo] && [fm fileExistsAtPath:url.path]) {
+                        NSError *e = nil;
+                        [fm removeItemAtPath:url.path error:nil];
+                        [fm copyItemAtPath:kSharedVideo toPath:url.path error:&e];
+                        vcam_log("video: grabacion reemplazada %s",
+                                 e ? [e.localizedDescription UTF8String] : "OK");
+                    }
+                }
+            });
+    }
 }
 %end
 
